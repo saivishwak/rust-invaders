@@ -1,19 +1,23 @@
 #![allow(unused)] // silence unused warnings while exploring (to comment out)
 
-use bevy::math::Vec3Swizzles;
+use bevy::diagnostic::Diagnostics;
 use bevy::prelude::*;
 use bevy::sprite::collide_aabb::collide;
+use bevy::{diagnostic::FrameTimeDiagnosticsPlugin, math::Vec3Swizzles};
 use components::{
 	Enemy, Explosion, ExplosionTimer, ExplosionToSpawn, FromEnemy, FromPlayer, Laser, Movable,
-	Player, SpriteSize, Velocity,
+	Player, Score, SpriteSize, Velocity,
 };
 use enemy::EnemyPlugin;
 use player::PlayerPlugin;
 use std::collections::HashSet;
 
+use text::TextPlugin;
+
 mod components;
 mod enemy;
 mod player;
+mod text;
 
 // region:    --- Asset Constants
 
@@ -32,6 +36,8 @@ const EXPLOSION_LEN: usize = 16;
 
 const SPRITE_SCALE: f32 = 0.5;
 
+const PLAYER_MAX_LIFE: u32 = 3;
+
 // endregion: --- Asset Constants
 
 // region:    --- Game Constants
@@ -40,7 +46,7 @@ const TIME_STEP: f32 = 1. / 60.;
 const BASE_SPEED: f32 = 500.;
 
 const PLAYER_RESPAWN_DELAY: f64 = 2.;
-const ENEMY_MAX: u32 = 2;
+const ENEMY_MAX: u32 = 10;
 const FORMATION_MEMBERS_MAX: u32 = 2;
 
 // endregion: --- Game Constants
@@ -49,6 +55,13 @@ const FORMATION_MEMBERS_MAX: u32 = 2;
 pub struct WinSize {
 	pub w: f32,
 	pub h: f32,
+}
+
+#[derive(Clone, Eq, PartialEq, Debug, Hash)]
+enum GameState {
+	Splash,
+	End,
+	Game,
 }
 
 struct GameTextures {
@@ -60,6 +73,9 @@ struct GameTextures {
 }
 
 struct EnemyCount(u32);
+pub struct GameScore(u32);
+
+pub struct PlayerLife(u32);
 
 struct PlayerState {
 	on: bool,       // alive
@@ -88,6 +104,7 @@ impl PlayerState {
 
 fn main() {
 	App::new()
+		.add_state(GameState::Game)
 		.insert_resource(ClearColor(Color::rgb(0.04, 0.04, 0.04)))
 		.insert_resource(WindowDescriptor {
 			title: "Rust Invaders!".to_string(),
@@ -98,12 +115,19 @@ fn main() {
 		.add_plugins(DefaultPlugins)
 		.add_plugin(PlayerPlugin)
 		.add_plugin(EnemyPlugin)
+		.add_plugin(TextPlugin)
+		.add_plugin(FrameTimeDiagnosticsPlugin::default())
 		.add_startup_system(setup_system)
-		.add_system(movable_system)
-		.add_system(player_laser_hit_enemy_system)
-		.add_system(enemy_laser_hit_player_system)
-		.add_system(explosion_to_spawn_system)
-		.add_system(explosion_animation_system)
+		.add_system_set(
+			SystemSet::on_update(GameState::Game)
+				.with_system(movable_system)
+				.with_system(player_laser_hit_enemy_system)
+				.with_system(enemy_laser_hit_player_system)
+				.with_system(explosion_to_spawn_system)
+				.with_system(explosion_animation_system),
+		)
+		.add_system_set(SystemSet::on_exit(GameState::Game).with_system(despawn_all))
+		.add_system_set(SystemSet::on_update(GameState::End).with_system(restart_game))
 		.run();
 }
 
@@ -142,6 +166,48 @@ fn setup_system(
 	};
 	commands.insert_resource(game_textures);
 	commands.insert_resource(EnemyCount(0));
+	commands.insert_resource(GameScore(0));
+	commands.insert_resource(PlayerLife(PLAYER_MAX_LIFE));
+}
+
+fn despawn_all(
+	mut commands: Commands,
+	kb: Res<Input<KeyCode>>,
+	mut state: ResMut<State<GameState>>,
+	enemy_query: Query<Entity, With<Enemy>>,
+	player_query: Query<Entity, With<Player>>,
+	laser_query: Query<Entity, With<Laser>>,
+	explosion_query: Query<Entity, With<Explosion>>,
+) {
+	for (enemy_en) in enemy_query.iter() {
+		commands.entity(enemy_en).despawn();
+	}
+	for (player_en) in player_query.iter() {
+		commands.entity(player_en).despawn();
+	}
+	for (laser_en) in laser_query.iter() {
+		commands.entity(laser_en).despawn();
+	}
+	for (explosion_en) in explosion_query.iter() {
+		commands.entity(explosion_en).despawn();
+	}
+}
+
+fn restart_game(
+	mut commands: Commands,
+	kb: Res<Input<KeyCode>>,
+	mut state: ResMut<State<GameState>>,
+	mut score: ResMut<GameScore>,
+	mut player_life: ResMut<PlayerLife>,
+	mut enemy_count: ResMut<EnemyCount>,
+) {
+	if kb.just_pressed(KeyCode::Space) {
+		println!("Restart game!");
+		score.0 = 0;
+		enemy_count.0 = 0;
+		player_life.0 = PLAYER_MAX_LIFE;
+		state.set(GameState::Game).expect("Failed to restart state to Game");
+	}
 }
 
 fn movable_system(
@@ -171,6 +237,7 @@ fn movable_system(
 fn player_laser_hit_enemy_system(
 	mut commands: Commands,
 	mut enemy_count: ResMut<EnemyCount>,
+	mut score: ResMut<GameScore>,
 	laser_query: Query<(Entity, &Transform, &SpriteSize), (With<Laser>, With<FromPlayer>)>,
 	enemy_query: Query<(Entity, &Transform, &SpriteSize), With<Enemy>>,
 ) {
@@ -207,7 +274,10 @@ fn player_laser_hit_enemy_system(
 				// remove the enemy
 				commands.entity(enemy_entity).despawn();
 				despawned_entities.insert(enemy_entity);
-				enemy_count.0 -= 1;
+				if enemy_count.0 > 0 {
+					enemy_count.0 -= 1;
+				}
+				score.0 += 1;
 
 				// remove the laser
 				commands.entity(laser_entity).despawn();
@@ -223,6 +293,8 @@ fn player_laser_hit_enemy_system(
 fn enemy_laser_hit_player_system(
 	mut commands: Commands,
 	mut player_state: ResMut<PlayerState>,
+	mut player_life: ResMut<PlayerLife>,
+	mut state: ResMut<State<GameState>>,
 	time: Res<Time>,
 	laser_query: Query<(Entity, &Transform, &SpriteSize), (With<Laser>, With<FromEnemy>)>,
 	player_query: Query<(Entity, &Transform, &SpriteSize), With<Player>>,
@@ -246,6 +318,16 @@ fn enemy_laser_hit_player_system(
 				// remove the player
 				commands.entity(player_entity).despawn();
 				player_state.shot(time.seconds_since_startup());
+				println!("{}", player_life.0);
+				if player_life.0 > 0 {
+					player_life.0 -= 1;
+				}
+
+				if player_life.0 <= 0 {
+					//End Game
+					println!("Setting state to END");
+					state.set(GameState::End).expect("Failed to change to end state");
+				}
 
 				// remove the laser
 				commands.entity(laser_entity).despawn();

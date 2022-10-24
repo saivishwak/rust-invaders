@@ -15,6 +15,9 @@ pub struct Movable {
 }
 
 #[derive(Component)]
+pub struct Score;
+
+#[derive(Component)]
 pub struct Laser;
 
 #[derive(Component)]
@@ -31,6 +34,12 @@ impl From<(f32, f32)> for SpriteSize {
 // region:    --- Player Components
 #[derive(Component)]
 pub struct Player;
+
+#[derive(Component)]
+pub struct PlayerLifeComp;
+
+#[derive(Component)]
+pub struct RestartText;
 
 #[derive(Component)]
 pub struct FromPlayer;
